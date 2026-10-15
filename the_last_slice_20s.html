@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>The Last Slice</title>
+<style>
+html,body{margin:0;height:100%;background:#07060a;overflow:hidden}
+#stage{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform-origin:50% 50%;overflow:hidden;background:#14121c}
+#c{position:absolute;left:0;top:0;width:1920px;height:1080px;display:block}
+#restart{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);padding:12px 28px;border:0;border-radius:999px;background:#f2b544;color:#1e1e24;font:700 17px system-ui,sans-serif;cursor:pointer;opacity:0;transition:opacity .4s}
+#restart.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c" width="1920" height="1080"></canvas>
+</div>
+<button id="restart" type="button">Replay</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const TAU = Math.PI * 2, PI = Math.PI, DUR = 20, W = 1920, H = 1080;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const sm = x => { x = clamp(x); return x * x * (3 - 2 * x); };
+function kf(t, p) {
+  if (t <= p[0][0]) return p[0][1];
+  for (let i = 0; i < p.length - 1; i++) {
+    const [a, va] = p[i], [b, vb] = p[i + 1];
+    if (t <= b) return va + (vb - va) * sm((t - a) / (b - a));
+  }
+  return p[p.length - 1][1];
+}
+function win(t, a, b, f) {
+  if (t < a || t > b) return 0;
+  return sm(Math.min((t - a) / f, (b - t) / f, 1));
+}
+function blink(t, times) {
+  let a = 0;
+  for (const bt of times) if (t >= bt && t <= bt + 0.18) a = Math.max(a, Math.sin(PI * (t - bt) / 0.18));
+  return a;
+}
+
+// ---------- Renderer, scene, camera ----------
+const renderer = new THREE.WebGLRenderer({ canvas: $('c'), antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H, false);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14121c);
+scene.fog = new THREE.Fog(0x2a1f2e, 9, 18);
+const camera = new THREE.PerspectiveCamera(42, W / H, 0.1, 50);
+
+// ---------- Helpers ----------
+const std = (c, r = 0.7, m = 0) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: m });
+function add(geo, mat, parent, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+const box = (w, h, d, mat, p, x, y, z) => add(new THREE.BoxGeometry(w, h, d), mat, p, x, y, z);
+const cyl = (rt, rb, h, mat, p, x, y, z, s = 16) => add(new THREE.CylinderGeometry(rt, rb, h, s), mat, p, x, y, z);
+const sph = (r, mat, p, x, y, z, s = 20) => add(new THREE.SphereGeometry(r, s, Math.round(s * 0.66)), mat, p, x, y, z);
+
+// ---------- Room ----------
+add(new THREE.PlaneGeometry(9, 12), std(0x6e4a2e, 0.55), scene).rotation.x = -PI / 2;
+add(new THREE.PlaneGeometry(9, 3.4), std(0x6b5244, 0.9), scene, 0, 1.7, -2.5);
+add(new THREE.PlaneGeometry(12, 3.4), std(0x54443a, 0.9), scene, -4.5, 1.7, 0).rotation.y = PI / 2;
+add(new THREE.PlaneGeometry(12, 3.4), std(0x54443a, 0.9), scene, 4.5, 1.7, 0).rotation.y = -PI / 2;
+add(new THREE.PlaneGeometry(9, 12), std(0x2a2330, 1), scene, 0, 3.4, 0).rotation.x = PI / 2;
+
+// Sunset city texture for the window
+const cvs = document.createElement('canvas');
+cvs.width = 1024; cvs.height = 512;
+const g2 = cvs.getContext('2d');
+const sky = g2.createLinearGradient(0, 0, 0, 512);
+sky.addColorStop(0, '#3b2a5c');
+sky.addColorStop(0.55, '#c9644a');
+sky.addColorStop(0.8, '#f2a452');
+sky.addColorStop(1, '#ffd39a');
+g2.fillStyle = sky; g2.fillRect(0, 0, 1024, 512);
+g2.fillStyle = '#ffe9b8';
+g2.beginPath(); g2.arc(640, 330, 46, 0, TAU); g2.fill();
+for (let i = 0; i < 40; i++) {
+  const x = i * 26, h = 70 + ((i * 97) % 200);
+  g2.fillStyle = i % 3 ? '#2a1f33' : '#342640';
+  g2.fillRect(x, 512 - h, 24, h);
+  for (let y = 512 - h + 10; y < 500; y += 20) {
+    if (((i * 7 + y) % 5) < 2) { g2.fillStyle = '#ffd27a'; g2.fillRect(x + 6, y, 6, 9); }
+  }
+}
+const cityTex = new THREE.CanvasTexture(cvs);
+add(new THREE.PlaneGeometry(5.4, 3.2), new THREE.MeshBasicMaterial({ map: cityTex }), scene, 0, 1.6, -2.48);
+
+const frameM = std(0x1c1a1f, 0.5);
+box(5.5, 0.08, 0.12, frameM, scene, 0, 3.24, -2.46);
+box(5.5, 0.08, 0.12, frameM, scene, 0, 0.02, -2.46);
+box(0.08, 3.2, 0.12, frameM, scene, -2.72, 1.6, -2.46);
+box(0.08, 3.2, 0.12, frameM, scene, 2.72, 1.6, -2.46);
+box(0.06, 3.2, 0.08, frameM, scene, 0, 1.6, -2.46);
+box(0.6, 3.3, 0.08, std(0xb98b5c, 1), scene, -3.1, 1.65, -2.1);
+box(0.6, 3.3, 0.08, std(0xb98b5c, 1), scene, 3.1, 1.65, -2.1);
+
+function tableLamp(x, z) {
+  box(0.5, 0.6, 0.5, std(0x3a2a22, 0.6), scene, x, 0.3, z);
+  cyl(0.05, 0.05, 0.22, std(0xd8c7a8), scene, x, 0.71, z);
+  const sh = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 0.3, 20, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0xffe2b0, emissive: 0xffb866, emissiveIntensity: 0.9, side: THREE.DoubleSide }));
+  sh.position.set(x, 0.97, z);
+  scene.add(sh);
+  const pl = new THREE.PointLight(0xffb866, 2.2, 7, 2);
+  pl.position.set(x, 1.1, z);
+  scene.add(pl);
+}
+tableLamp(-2.2, -0.9);
+tableLamp(2.2, -0.9);
+
+// ---------- Lighting ----------
+scene.add(new THREE.AmbientLight(0x4a3a4c, 0.45));
+const sunLight = new THREE.DirectionalLight(0xffb070, 1.2);
+sunLight.position.set(-1.5, 2.8, -4);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+sunLight.shadow.camera.left = -4; sunLight.shadow.camera.right = 4;
+sunLight.shadow.camera.top = 4; sunLight.shadow.camera.bottom = -2;
+sunLight.target.position.set(0, 0.8, 0.5);
+scene.add(sunLight, sunLight.target);
+const ceilingLight = new THREE.PointLight(0xffe0b0, 0.9, 9, 2);
+ceilingLight.position.set(0, 3.0, 0.6);
+scene.add(ceilingLight);
+
+// Floor lamp
+cyl(0.2, 0.2, 0.03, std(0x222222), scene, 2.8, 0.02, 0.4, 24);
+cyl(0.02, 0.02, 2.2, std(0x222222), scene, 2.8, 1.1, 0.4);
+const fShade = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.26, 0.4, 24, 1, true),
+  new THREE.MeshStandardMaterial({ color: 0xf7e3b5, emissive: 0xffc070, emissiveIntensity: 0.7, side: THREE.DoubleSide }));
+fShade.position.set(2.8, 2.35, 0.4);
+scene.add(fShade);
+const fl = new THREE.PointLight(0xffc070, 1.6, 7, 2);
+fl.position.set(2.8, 2.2, 0.4);
+scene.add(fl);
+
+// ---------- Furniture ----------
+const sofaM = std(0x3b4a48, 0.85), cushM = std(0x4c5f5b, 0.9);
+box(2.8, 0.4, 1.0, sofaM, scene, 0, 0.3, 0);
+box(2.8, 0.9, 0.3, sofaM, scene, 0, 0.75, -0.5);
+box(0.22, 0.5, 1.0, sofaM, scene, -1.5, 0.72, 0);
+box(0.22, 0.5, 1.0, sofaM, scene, 1.5, 0.72, 0);
+box(1.36, 0.14, 0.92, cushM, scene, -0.7, 0.57, 0.03);
+box(1.36, 0.14, 0.92, cushM, scene, 0.7, 0.57, 0.03);
+box(1.32, 0.42, 0.2, cushM, scene, -0.7, 0.9, -0.3);
+box(1.32, 0.42, 0.2, cushM, scene, 0.7, 0.9, -0.3);
+
+add(new THREE.PlaneGeometry(3.6, 2.4), std(0x6b3f3a, 1), scene, 0, 0.005, 1.2).rotation.x = -PI / 2;
+
+// Coffee table, pulled forward so both characters can reach the slice
+const TABLE_Z = 0.85;
+const tableM = std(0x7a4b2e, 0.5), legM = std(0x3a2418, 0.6);
+box(1.4, 0.06, 0.7, tableM, scene, 0, 0.45, TABLE_Z);
+box(1.2, 0.03, 0.6, legM, scene, 0, 0.12, TABLE_Z);
+for (const lx of [-0.65, 0.65]) for (const lz of [TABLE_Z - 0.3, TABLE_Z + 0.3]) box(0.05, 0.42, 0.05, legM, scene, lx, 0.21, lz);
+
+// Plate and a few props
+cyl(0.32, 0.32, 0.02, std(0xf4f1ea, 0.4), scene, 0, 0.49, TABLE_Z, 40);
+box(0.2, 0.04, 0.22, std(0x4a6fa5), scene, 0.5, 0.5, 1.1);
+cyl(0.045, 0.045, 0.1, std(0xd9654a), scene, -0.5, 0.53, 0.5, 18);
+
+// ---------- The last slice (two halves) ----------
+const cheeseM = std(0xf0c24e, 0.5), crustM = std(0xc98a45, 0.8), pepM = std(0xa8322a, 0.5);
+function sliceHalf(shapeDef, pepperoni) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shapeDef.forEach(p => p.length === 2 ? shape.lineTo(p[0], p[1]) : shape.quadraticCurveTo(p[0], p[1], p[2], p[3]));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.04, bevelEnabled: false });
+  const grp = new THREE.Group();
+  const mesh = new THREE.Mesh(geo, [cheeseM, crustM]);
+  mesh.rotation.x = -PI / 2;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  grp.add(mesh);
+  for (const [x, y, z] of pepperoni) {
+    const p = cyl(0.035, 0.035, 0.012, pepM, grp, x, y, z, 14);
+    p.castShadow = false;
+  }
+  scene.add(grp);
+  return grp;
+}
+const sliceA = sliceHalf([[-0.22, 0.42], [-0.08, 0.52, 0.06, 0.47]], [[-0.06, 0.045, -0.2], [-0.03, 0.045, -0.3]]);
+const sliceB = sliceHalf([[0.06, 0.47], [0.13, 0.5, 0.22, 0.42]], [[0.065, 0.045, -0.2]]);
+
+// ---------- Characters ----------
+function person(x, o) {
+  const root = new THREE.Group();
+  root.position.set(x, 0.64, 0);
+  scene.add(root);
+  const skin = std(o.skin, 0.55), shirt = std(o.shirt, 0.85), pants = std(o.pants, 0.9);
+  const hair = std(o.hair, 0.45), dark = std(0x1d1a1a, 0.5), white = std(0xf4f1ec, 0.3);
+  const shoe = std(o.shoe || 0x1c1c20, 0.6), mouthM = std(0x4a1d1b, 0.5);
+
+  for (const lx of [-0.13, 0.13]) {
+    const hip = new THREE.Group();
+    hip.position.set(lx, 0.1, 0);
+    root.add(hip);
+    const thigh = cyl(0.1, 0.095, 0.55, pants, hip, 0, 0, 0.27);
+    thigh.rotation.x = PI / 2;
+    const knee = new THREE.Group();
+    knee.position.set(0, 0, 0.55);
+    hip.add(knee);
+    cyl(0.09, 0.08, 0.7, pants, knee, 0, -0.35, 0);
+    box(0.16, 0.1, 0.3, shoe, knee, 0, -0.72, 0.08);
+  }
+
+  const torso = new THREE.Group();
+  torso.position.set(0, 0.1, 0);
+  root.add(torso);
+  const chest = cyl(0.2, 0.25, 0.78, shirt, torso, 0, 0.44, 0, 20);
+  chest.scale.set(1.25, 1, 0.85);
+
+  const head = new THREE.Group();
+  head.position.set(0, 0.8, 0);
+  torso.add(head);
+  cyl(0.07, 0.08, 0.14, skin, head, 0, -0.02, 0, 12);
+  if (o.collar) add(new THREE.TorusGeometry(0.1, 0.03, 8, 20), shirt, head, 0, 0.0, 0).rotation.x = PI / 2;
+  const skull = sph(0.2, skin, head, 0, 0.22, 0, 28);
+  skull.scale.set(0.92, 1.05, 0.96);
+  sph(0.035, skin, head, -0.19, 0.22, 0, 10);
+  sph(0.035, skin, head, 0.19, 0.22, 0, 10);
+  sph(0.022, skin, head, 0, 0.2, 0.2, 10);
+
+  if (o.longHair) {
+    sph(0.22, hair, head, 0, 0.2, -0.05, 20).scale.set(1.05, 1.25, 0.95);
+    cyl(0.2, 0.24, 0.42, hair, torso, 0, 0.5, -0.07, 18);
+    add(new THREE.SphereGeometry(0.218, 24, 14, 0, TAU, 0, PI * 0.42), hair, head, 0, 0.22, -0.005);
+  } else {
+    add(new THREE.SphereGeometry(0.215, 24, 14, 0, TAU, 0, PI * 0.42), hair, head, 0, 0.23, -0.005);
+    box(0.15, 0.09, 0.22, hair, head, 0, 0.42, 0.02).rotation.x = -0.3;
+  }
+
+  const irises = [], lids = [], brows = [];
+  for (const s of [-1, 1]) {
+    const ew = sph(0.045, white, head, s * 0.075, 0.23, 0.165, 14);
+    ew.scale.set(1, 1.1, 0.55);
+    const ir = sph(0.024, dark, head, s * 0.075, 0.23, 0.195, 12);
+    ir.userData.bx = s * 0.075;
+    irises.push(ir);
+    const lid = add(new THREE.SphereGeometry(0.05, 14, 8, 0, TAU, 0, PI / 2), skin, head, s * 0.075, 0.245, 0.185);
+    lid.rotation.x = PI;
+    lid.scale.y = 0.05;
+    lids.push(lid);
+    const br = box(0.11, 0.024, 0.035, hair, head, s * 0.075, 0.3, 0.175);
+    br.userData.by = 0.3;
+    brows.push(br);
+  }
+
+  const mg = new THREE.Group();
+  mg.position.set(0, 0.1, 0.19);
+  head.add(mg);
+  const smile = add(new THREE.TorusGeometry(0.055, 0.011, 8, 20, PI), mouthM, mg, 0, 0, 0);
+  smile.rotation.z = PI;
+  const open = add(new THREE.SphereGeometry(0.04, 12, 8), mouthM, mg, 0, -0.005, 0.01);
+  open.scale.set(1.2, 0.6, 0.4);
+  open.visible = false;
+  const laugh = add(new THREE.SphereGeometry(0.06, 14, 10), mouthM, mg, 0, -0.02, 0.01);
+  laugh.scale.set(1.5, 0.8, 0.5);
+  laugh.visible = false;
+  const flat = box(0.08, 0.012, 0.02, mouthM, mg, 0, -0.01, 0.02);
+  flat.visible = false;
+
+  const makeArm = side => {
+    const sh = new THREE.Group();
+    sh.position.set(side * 0.3, 0.72, 0);
+    torso.add(sh);
+    cyl(0.075, 0.065, 0.5, shirt, sh, 0, -0.25, 0, 12);
+    const el = new THREE.Group();
+    el.position.set(0, -0.5, 0);
+    sh.add(el);
+    cyl(0.065, 0.055, 0.45, shirt, el, 0, -0.22, 0, 12);
+    sph(0.07, skin, el, 0, -0.48, 0, 12).scale.set(0.9, 1.1, 0.8);
+    return { sh, el };
+  };
+  return {
+    root, torso, chest, head, irises, lids, brows, smile, open, laugh, flat,
+    armN: makeArm(o.nearSide), armF: makeArm(-o.nearSide)
+  };
+}
+
+const man = person(-0.7, { skin: 0xd9a07a, shirt: 0x151515, pants: 0x23262e, hair: 0x0d0d0f, longHair: false, nearSide: 1, collar: true, shoe: 0xeeeeee });
+const woman = person(0.7, { skin: 0xf0bc99, shirt: 0xa3262b, pants: 0x22283a, hair: 0x2a1a14, longHair: true, nearSide: -1, collar: true, shoe: 0x1a1a1c });
+
+// Two-bone IK: moves the hand to a world-space target by solving the shoulder and elbow angles.
+function ikArm(arm, torso, target) {
+  const tl = torso.worldToLocal(target.clone());
+  const d = new THREE.Vector3().subVectors(tl, arm.sh.position);
+  const L1 = 0.5, L2 = 0.5;
+  const len = clamp(d.length(), 0.05, L1 + L2 - 0.01);
+  const dn = d.clone().normalize();
+  const A = Math.acos(clamp((L1 * L1 + len * len - L2 * L2) / (2 * L1 * len), -1, 1));
+  const perp = new THREE.Vector3(0, -1, 0);
+  perp.sub(dn.clone().multiplyScalar(perp.dot(dn)));
+  if (perp.lengthSq() < 1e-4) perp.set(0, 0, 1);
+  perp.normalize();
+  const u = dn.clone().multiplyScalar(Math.cos(A)).add(perp.multiplyScalar(Math.sin(A)));
+  const flex = PI - Math.acos(clamp((L1 * L1 + L2 * L2 - len * len) / (2 * L1 * L2), -1, 1));
+  arm.sh.rotation.set(Math.atan2(-u.z, -u.y), 0, Math.asin(clamp(u.x, -1, 1)));
+  arm.el.rotation.set(-flex, 0, 0);
+}
+
+function setMouth(p, s) {
+  p.smile.visible = s === 'smile';
+  p.open.visible = s === 'open' || s === 'O';
+  p.open.scale.set(s === 'O' ? 0.85 : 1.2, s === 'O' ? 1.3 : 0.6, 0.4);
+  p.laugh.visible = s === 'laugh';
+  p.flat.visible = s === 'flat';
+}
+
+// ---------- Timeline (20 seconds) ----------
+// 0-5 camera moves in, woman notices slice | 5-10 both reach, hands collide
+// 10-15 man pulls slice, woman folds arms | 15-20 he breaks it, offers the bigger piece, she leans on him
+const SLICE_Y = 0.52, SLICE_Z = TABLE_Z;
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+
+function update(t) {
+  t = clamp(t, 0, DUR);
+  $('c').style.opacity = sm(t / 1.2).toFixed(3);
+
+  // Camera: push in, slight drift toward the table, settle wide
+  camera.position.set(
+    kf(t, [[0, 0.2], [5, 0.1], [10, 0.05], [15, -0.15], [20, 0]]),
+    kf(t, [[0, 1.85], [5, 1.7], [15, 1.65], [20, 1.7]]),
+    kf(t, [[0, 5.2], [5, 4.0], [10, 3.7], [15, 3.9], [20, 4.3]])
+  );
+  camera.lookAt(0, kf(t, [[0, 1.25], [20, 1.2]]), 0.5);
+
+  // Breathing
+  man.chest.scale.y = 1 + 0.02 * Math.sin(TAU * t / 3.4);
+  woman.chest.scale.y = 1 + 0.02 * Math.sin(TAU * t / 3.9 + 1);
+
+  // Torsos lean toward the table while reaching; Maya leans into Daniel at the end
+  man.torso.rotation.x = kf(t, [[0, 0], [4.5, 0], [6, -0.45], [15, -0.45], [17, -0.2], [20, -0.2]]);
+  woman.torso.rotation.x = kf(t, [[0, 0], [4.5, 0], [6, -0.45], [9, -0.45], [10, -0.1], [15, -0.1], [16.5, -0.45], [18.5, -0.45], [20, -0.2]]);
+  woman.torso.rotation.z = kf(t, [[18, 0], [19.5, 0.18], [20, 0.18]]);
+  woman.root.position.x = kf(t, [[0, 0.7], [18, 0.7], [20, 0.58]]);
+  man.root.updateMatrixWorld(true);
+  woman.root.updateMatrixWorld(true);
+
+  // Arm targets (world space)
+  // Daniel's near arm: rest -> reach -> collide -> pull the slice toward himself -> hold it
+  const mTarget = V(
+    kf(t, [[0, -0.9], [5, -0.9], [6.8, -0.2], [7.6, -0.06], [8.4, -0.2], [10, -0.2], [15, -0.42], [20, -0.42]]),
+    kf(t, [[0, 0.78], [5, 0.78], [6.8, SLICE_Y + 0.02], [15, SLICE_Y + 0.08], [20, SLICE_Y + 0.08]]),
+    kf(t, [[0, 0.3], [5, 0.3], [6.8, SLICE_Z], [15, 0.7], [20, 0.7]])
+  );
+  // Maya's near arm: rest -> reach -> collide -> fold -> offer the bigger piece
+  const wTarget = V(
+    kf(t, [[0, 0.9], [5, 0.9], [6.8, 0.2], [7.6, 0.06], [8.4, 0.2], [9.5, 0.72], [15, 0.72], [16.5, 0.62], [18.5, 0.42], [20, 0.42]]),
+    kf(t, [[0, 0.78], [5, 0.78], [6.8, SLICE_Y + 0.02], [8.4, SLICE_Y + 0.02], [9.5, 1.0], [15, 1.0], [16.5, 0.95], [18.5, 0.62], [20, 0.62]]),
+    kf(t, [[0, 0.3], [5, 0.3], [6.8, SLICE_Z], [8.4, SLICE_Z], [9.5, 0.25], [15, 0.25], [16.5, 0.25], [18.5, 0.62], [20, 0.62]])
+  );
+  // Far arms: Daniel's rests on his thigh; Maya's folds across her chest
+  const mFar = V(-1.05, 0.8, 0.3);
+  const wFar = V(
+    kf(t, [[0, 1.05], [9.5, 1.05], [10.8, 0.62], [18.5, 0.6], [20, 0.6]]),
+    kf(t, [[0, 0.8], [9.5, 0.8], [10.8, 0.94], [18.5, 0.72], [20, 0.72]]),
+    kf(t, [[0, 0.3], [9.5, 0.3], [10.8, 0.24], [18.5, 0.5], [20, 0.5]])
+  );
+
+  scene.updateMatrixWorld(true);
+  ikArm(man.armN, man.torso, mTarget);
+  ikArm(man.armF, man.torso, mFar);
+  ikArm(woman.armN, woman.torso, wTarget);
+  ikArm(woman.armF, woman.torso, wFar);
+
+  // Heads: Daniel looks at the slice, then at Maya; Maya looks at the slice, then stares at Daniel
+  const surprise = win(t, 7.6, 9.2, 0.4);
+  man.head.rotation.set(
+    kf(t, [[0, 0], [4.5, 0], [6, -0.25], [15, -0.25], [17, 0], [20, 0]]) + 0.12 * surprise,
+    kf(t, [[0, 0.05], [3, 0.1], [6, 0.3], [15, 0.3], [17, 0.4], [20, 0.35]]),
+    0.04 * Math.sin(TAU * t / 5)
+  );
+  woman.head.rotation.set(
+    kf(t, [[0, -0.3], [4.5, -0.3], [6, -0.15], [9, -0.15], [10, 0.02], [15, 0.02], [16.5, -0.15], [18, -0.2], [20, -0.2]]) + 0.15 * surprise,
+    kf(t, [[0, -0.35], [4.5, -0.35], [6, -0.3], [9, -0.3], [10, -0.4], [15, -0.4], [16.5, -0.3], [18, -0.1], [20, -0.1]]),
+    kf(t, [[0, 0], [10, 0], [11, 0.08], [15, 0.08], [16.5, 0], [20, 0]]) + 0.05 * Math.sin(TAU * t / 4)
+  );
+
+  // Blinks (separate timings for each) and gaze
+  man.lids.forEach(l => l.scale.y = 0.05 + 0.95 * blink(t, [1.4, 6.2, 12.5, 18.3]));
+  woman.lids.forEach(l => l.scale.y = 0.05 + 0.95 * blink(t, [2.6, 7.1, 13.7, 19.2]));
+  const mGaze = kf(t, [[0, 0], [5, 0], [6, 1], [15, 1], [17, 1], [20, 1]]);
+  const wGaze = kf(t, [[0, -1], [5, -1], [6, -1], [15, -1], [16.5, -1], [18, 0], [20, 0]]);
+  man.irises.forEach(ir => ir.position.x = ir.userData.bx + 0.014 * mGaze);
+  woman.irises.forEach(ir => ir.position.x = ir.userData.bx + 0.014 * wGaze);
+
+  // Brows
+  const mBrow = kf(t, [[0, 0], [6, 0], [7.6, 0.8], [9, 0.4], [15, 0.2], [16.5, 0.7], [20, 0.6]]);
+  man.brows.forEach(b => b.position.y = b.userData.by + 0.012 * mBrow);
+  const wBrow = kf(t, [[0, 0], [7, 0], [7.6, 1], [9, 0.6], [10, -0.4], [15, -0.4], [17, 0.1], [20, 0.2]]);
+  woman.brows.forEach(b => b.position.y = b.userData.by + 0.012 * wBrow);
+
+  // Mouths
+  setMouth(man, t >= 7.6 && t <= 8.4 ? 'open' : 'smile');
+  setMouth(woman, t < 7 ? 'flat'
+    : t < 8.8 ? (t >= 7.6 ? 'O' : 'flat')
+    : t < 17 ? 'flat'
+    : 'smile');
+
+  // The slice: sits on the plate, follows Daniel's hand, then splits at 16.5s
+  const sliceX = kf(t, [[0, 0], [10, 0], [15, -0.42], [20, -0.42]]);
+  const sliceZ = kf(t, [[0, SLICE_Z], [10, SLICE_Z], [15, 0.7], [20, 0.7]]);
+  sliceB.position.set(sliceX, SLICE_Y, sliceZ);
+  const sp = sm((t - 16.5) / 2);
+  sliceA.position.set(
+    sliceX + (0.42 - sliceX) * sp,
+    SLICE_Y + 0.08 * Math.sin(PI * sp),
+    sliceZ + (0.62 - sliceZ) * sp
+  );
+  sliceA.rotation.y = 0.4 * sp;
+
+  renderer.render(scene, camera);
+  $('restart').classList.toggle('show', t >= DUR);
+}
+
+// ---------- Playback ----------
+let t0 = 0, raf = 0;
+function loop(now) {
+  const t = (now - t0) / 1000;
+  update(t);
+  if (t < DUR) raf = requestAnimationFrame(loop);
+}
+function play() {
+  cancelAnimationFrame(raf);
+  t0 = performance.now();
+  raf = requestAnimationFrame(loop);
+}
+window.renderAt = t => { cancelAnimationFrame(raf); update(t); };
+
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  $('stage').style.transform = `translate(-50%,-50%) scale(${s})`;
+}
+window.addEventListener('resize', fit);
+$('restart').addEventListener('click', play);
+
+fit();
+update(0);
+play();
+</script>
+</body>
+</html>
